@@ -1,0 +1,280 @@
+/**
+ * Core Philosophy: This ruleset enforces a strict, hierarchical faculty-ownership model for the CodeSleuth application.
+ * All core data, including classes, assignments, submissions, and reports, is nested under a faculty member's
+ * unique user ID, ensuring that faculty can only access and manage their own information. There is no concept
+ * of public data; all access requires authentication.
+ *
+ * Data Structure: The primary data is organized under the `/faculties/{facultyId}` path. This creates a secure data
+ * silo for each faculty member. A top-level `/file_uploads` collection is used to store metadata for all uploaded
+ * files, such as student submissions and assignment starter code.
+ *
+ * Key Security Decisions:
+ * - Strict Ownership: A user can only access data located within their own path (`/faculties/{auth.uid}/...`).
+ * - No Public Listing: Users cannot list documents outside of their own data tree. Top-level collections that mix
+ *   data from multiple users (like `/file_uploads`) have list operations disabled to prevent data leakage.
+ * - Authorization via Denormalization: The `/file_uploads` collection is secured using a denormalized `facultyId` field
+ *   on each document. This allows for fast, secure, and independent authorization checks without needing costly or
+ *   impossible cross-collection lookups.
+ * - Self-Service Profile Creation: A newly authenticated faculty member is permitted to create their own profile
+ *   document in the `/faculties` collection, but only if the document ID matches their authentication UID.
+ *
+ * Denormalization for Authorization:
+ * To ensure fast and secure access control, the `/file_uploads/{fileUploadId}` documents contain a denormalized
+ * `facultyId` field. This allows the rules to verify ownership directly from the document itself, rather than
+ * attempting a slow and complex `get()` call to a related `Submission` or `Assignment` document to determine ownership.
+ *
+ * Structural Segregation:
+ * The data model naturally segregates each faculty member's data into their own document tree. This is a highly
+ * secure and performant pattern that prevents faculty from accessing each other's classes, assignments, or student
+ * submissions.
+ */
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -------------------------------------------------------------------------
+    // Helper Functions
+    // -------------------------------------------------------------------------
+
+    /**
+     * Verifies that the user is signed in.
+     */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /**
+     * Verifies that the requesting user's UID matches the specified userId.
+     * This is the primary function for enforcing path-based ownership.
+     * @param userId The UID to check against the authenticated user's UID.
+     */
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    /**
+     * Verifies ownership for an existing document. Used for update and delete.
+     * @param userId The UID to check against the authenticated user's UID.
+     */
+    function isExistingOwner(userId) {
+      return isOwner(userId) && resource != null;
+    }
+
+    /**
+     * Validates that the internal IDs of a new Faculty document match the path.
+     * Ensures data consistency at the point of creation.
+     * @param facultyId The document ID from the path.
+     */
+    function hasValidFacultyDataForCreate(facultyId) {
+      return request.resource.data.firebaseUid == facultyId && request.resource.data.id == facultyId;
+    }
+
+    /**
+     * Validates that the critical, identifying fields of a Faculty document are not changed.
+     */
+    function hasImmutableFacultyData() {
+      return request.resource.data.firebaseUid == resource.data.firebaseUid && request.resource.data.id == resource.data.id;
+    }
+
+    /**
+     * Validates that a new Class document correctly links to its parent faculty.
+     * @param facultyId The faculty ID from the path.
+     */
+    function hasValidClassDataForCreate(facultyId) {
+      return request.resource.data.facultyId == facultyId;
+    }
+
+    /**
+     * Validates that the parent faculty link on a Class document is not changed.
+     */
+    function hasImmutableClassData() {
+      return request.resource.data.facultyId == resource.data.facultyId;
+    }
+
+    /**
+     * Validates that a new Assignment correctly links to its parent class.
+     * @param classId The class ID from the path.
+     */
+    function hasValidAssignmentDataForCreate(classId) {
+      return request.resource.data.classId == classId;
+    }
+
+    /**
+     * Validates that the parent class link on an Assignment is not changed.
+     */
+    function hasImmutableAssignmentData() {
+      return request.resource.data.classId == resource.data.classId;
+    }
+
+    /**
+     * Validates that a new Submission correctly links to its parent assignment.
+     * @param assignmentId The assignment ID from the path.
+     */
+    function hasValidSubmissionDataForCreate(assignmentId) {
+      return request.resource.data.assignmentId == assignmentId;
+    }
+
+    /**
+     * Validates that the parent assignment link on a Submission is not changed.
+     */
+    function hasImmutableSubmissionData() {
+      return request.resource.data.assignmentId == resource.data.assignmentId;
+    }
+
+    /**
+     * Validates that a new PlagiarismReport correctly links to its parent assignment.
+     * @param assignmentId The assignment ID from the path.
+     */
+    function hasValidReportDataForCreate(assignmentId) {
+      return request.resource.data.assignmentId == assignmentId;
+    }
+
+    /**
+     * Validates that the parent assignment link on a PlagiarismReport is not changed.
+     */
+    function hasImmutableReportData() {
+      return request.resource.data.assignmentId == resource.data.assignmentId;
+    }
+
+    /**
+     * Validates that a new SimilarityAnalysis correctly links to its parent report.
+     * @param plagiarismReportId The report ID from the path.
+     */
+    function hasValidAnalysisDataForCreate(plagiarismReportId) {
+      return request.resource.data.plagiarismReportId == plagiarismReportId;
+    }
+
+    /**
+     * Validates that the parent report link on a SimilarityAnalysis is not changed.
+     */
+    function hasImmutableAnalysisData() {
+      return request.resource.data.plagiarismReportId == resource.data.plagiarismReportId;
+    }
+
+    /**
+     * Validates ownership of a FileUpload document based on its internal `facultyId`.
+     * This is used for update and delete operations on existing documents.
+     */
+    function isDocumentOwner() {
+      return isSignedIn() && resource != null && resource.data.facultyId == request.auth.uid;
+    }
+
+    /**
+     * Validates ownership for a new FileUpload document being created.
+     */
+    function ownsCreatedFile() {
+      return isSignedIn() && request.resource.data.facultyId == request.auth.uid;
+    }
+
+    /**
+     * Validates that the owning faculty link on a FileUpload document is not changed.
+     */
+    function hasImmutableFileUploadData() {
+      return request.resource.data.facultyId == resource.data.facultyId;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection Rules
+    // -------------------------------------------------------------------------
+
+    /**
+     * @description Manages faculty member profiles.
+     * @path /faculties/{facultyId}
+     * @allow (create) A new user can create their own profile if their auth UID matches the document ID.
+     * @deny (create) An authenticated user trying to create a profile for another user ID.
+     * @principle Restricts access to a user's own profile and allows self-service creation.
+     */
+    match /faculties/{facultyId} {
+      allow get: if isOwner(facultyId);
+      allow list: if false;
+      allow create: if isOwner(facultyId) && hasValidFacultyDataForCreate(facultyId);
+      allow update: if isExistingOwner(facultyId) && hasImmutableFacultyData();
+      allow delete: if isExistingOwner(facultyId);
+
+      /**
+       * @description Manages classes created by a faculty member.
+       * @path /faculties/{facultyId}/classes/{classId}
+       * @allow (get) The faculty member `{facultyId}` can read their own class document.
+       * @deny (get) Any other faculty member trying to read this class document.
+       * @principle Enforces strict data siloing, where a user can only access their own sub-collections.
+       */
+      match /classes/{classId} {
+        allow get, list: if isOwner(facultyId);
+        allow create: if isOwner(facultyId) && hasValidClassDataForCreate(facultyId);
+        allow update: if isExistingOwner(facultyId) && hasImmutableClassData();
+        allow delete: if isExistingOwner(facultyId);
+
+        /**
+         * @description Manages assignments within a specific class.
+         * @path /faculties/{facultyId}/classes/{classId}/assignments/{assignmentId}
+         * @allow (create) The faculty member `{facultyId}` can create a new assignment in their own class.
+         * @deny (list) An anonymous user trying to list assignments.
+         * @principle Extends the parent's ownership model to nested data.
+         */
+        match /assignments/{assignmentId} {
+          allow get, list: if isOwner(facultyId);
+          allow create: if isOwner(facultyId) && hasValidAssignmentDataForCreate(classId);
+          allow update: if isExistingOwner(facultyId) && hasImmutableAssignmentData();
+          allow delete: if isExistingOwner(facultyId);
+
+          /**
+           * @description Manages student submissions for an assignment.
+           * @path /faculties/{facultyId}/classes/{classId}/assignments/{assignmentId}/submissions/{submissionId}
+           * @allow (get) The faculty member `{facultyId}` can read a submission for their own assignment.
+           * @deny (delete) A different faculty member trying to delete this submission.
+           * @principle Ensures sensitive student submission data is only visible to the owning faculty member.
+           */
+          match /submissions/{submissionId} {
+            allow get, list: if isOwner(facultyId);
+            allow create: if isOwner(facultyId) && hasValidSubmissionDataForCreate(assignmentId);
+            allow update: if isExistingOwner(facultyId) && hasImmutableSubmissionData();
+            allow delete: if isExistingOwner(facultyId);
+          }
+
+          /**
+           * @description Manages plagiarism reports generated for an assignment.
+           * @path /faculties/{facultyId}/classes/{classId}/assignments/{assignmentId}/plagiarism_reports/{plagiarismReportId}
+           * @allow (create) The owning faculty member can create a report for their assignment.
+           * @deny (get) Any other faculty member trying to read the report.
+           * @principle Secures confidential academic integrity reports to the responsible faculty member.
+           */
+          match /plagiarism_reports/{plagiarismReportId} {
+            allow get, list: if isOwner(facultyId);
+            allow create: if isOwner(facultyId) && hasValidReportDataForCreate(assignmentId);
+            allow update: if isExistingOwner(facultyId) && hasImmutableReportData();
+            allow delete: if isExistingOwner(facultyId);
+
+            /**
+             * @description Manages the detailed similarity analysis between two submissions.
+             * @path /faculties/{facultyId}/.../plagiarism_reports/{plagiarismReportId}/similarity_analyses/{similarityAnalysisId}
+             * @allow (list) The owning faculty member can list all analysis pairs for their report.
+             * @deny (update) Any other faculty member trying to modify an analysis result.
+             * @principle Protects the granular results of plagiarism detection, inheriting ownership from the top-level faculty path.
+             */
+            match /similarity_analyses/{similarityAnalysisId} {
+              allow get, list: if isOwner(facultyId);
+              allow create: if isOwner(facultyId) && hasValidAnalysisDataForCreate(plagiarismReportId);
+              allow update: if isExistingOwner(facultyId) && hasImmutableAnalysisData();
+              allow delete: if isExistingOwner(facultyId);
+            }
+          }
+        }
+      }
+    }
+
+    /**
+     * @description Manages metadata for all uploaded files (submissions, starter code, etc.).
+     * @path /file_uploads/{fileUploadId}
+     * @allow (create) An authenticated faculty member can create a file record, embedding their own UID.
+     * @deny (list) Any user trying to list all files in the system to prevent data leakage.
+     * @principle Enforces document ownership via a denormalized 'facultyId' field, avoiding complex lookups.
+     */
+    match /file_uploads/{fileUploadId} {
+      allow get: if isDocumentOwner();
+      allow list: if false;
+      allow create: if ownsCreatedFile();
+      allow update: if isDocumentOwner() && hasImmutableFileUploadData();
+      allow delete: if isDocumentOwner();
+    }
+  }
+}
